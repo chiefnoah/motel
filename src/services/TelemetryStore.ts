@@ -1055,7 +1055,7 @@ export const makeTelemetryStoreLayer = (opts: TelemetryStoreOptions) => Layer.ef
 								insertSpan.run(
 									span.traceId,
 									span.spanId,
-									span.parentSpanId ?? null,
+									span.parentSpanId || null,
 									serviceName,
 									scopeName,
 									span.name ?? "unknown",
