@@ -20,7 +20,7 @@
  */
 
 import * as BunWorker from "@effect/platform-bun/BunWorker"
-import { Context, Effect, Layer, Scope } from "effect"
+import { Context, Effect, Exit, Layer, Scope } from "effect"
 import * as RpcClient from "effect/unstable/rpc/RpcClient"
 import type { RpcClientError } from "effect/unstable/rpc/RpcClientError"
 import * as RpcSerialization from "effect/unstable/rpc/RpcSerialization"
@@ -50,16 +50,21 @@ const WorkerProtocol = RpcClient.layerProtocolWorker({ size: 1 }).pipe(
 export const AsyncIngestLive = Layer.effect(
 	AsyncIngest,
 	Effect.gen(function*() {
-		const scope = yield* Scope.Scope
-		// Keep daemon startup cheap: creating the RPC client here would eagerly
-		// spawn the worker and make /api/health wait on the worker's SQLite
-		// bootstrap. Cache a lazy initializer instead so the worker only starts
-		// on the first ingest request, but is still shared thereafter.
+		const outerScope = yield* Scope.Scope
+		// Build WorkerProtocol in a dedicated scope whose lifetime is tied to
+		// the outer (service) scope. Without this, Effect.provide(WorkerProtocol)
+		// creates a temporary scope that closes immediately after client
+		// construction, finalizing the worker pool before any RPC can execute.
+		const workerScope = yield* Scope.make()
+		yield* Scope.addFinalizer(outerScope, Scope.close(workerScope, Exit.succeed(undefined as void)))
+		const workerContext = yield* Layer.buildWithScope(WorkerProtocol, workerScope)
+		// Keep daemon startup cheap: cache the client so the worker is shared
+		// across all ingest requests.
 		const getClient = yield* RpcClient.make(IngestRpcs).pipe(
-			Effect.provide(WorkerProtocol),
+			Effect.provide(workerContext),
 			Effect.cached,
 		)
-		const withScope = <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.provideService(effect, Scope.Scope, scope)
+		const withScope = <A, E, R>(effect: Effect.Effect<A, E, R>) => Effect.provideService(effect, Scope.Scope, outerScope)
 		return {
 			ingestTraces: (input, options) => Effect.flatMap(withScope(getClient), (client) => client.ingestTraces(input, options)),
 			ingestLogs: (input, options) => Effect.flatMap(withScope(getClient), (client) => client.ingestLogs(input, options)),
